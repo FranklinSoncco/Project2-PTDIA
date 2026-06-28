@@ -4,7 +4,7 @@ from pathlib import Path
 import streamlit as st
 
 from utils import session as session_utils
-from utils import json_manager, inference
+from utils import json_manager, inference, api_client
 
 BUILD_STEPS = [
     "Analyzing your decisions…",
@@ -56,6 +56,24 @@ def render_building():
 
         st.session_state.session_json = session_json
         st.session_state.summary_text = summary_text
+
+        # envío "best effort" al backend del equipo — no bloquea ni rompe
+        # el reporte si falla, porque el resumen ya se construyó localmente
+        # con NUESTRO formato (session.json no cambia por esto)
+        backend_url = api_client.get_backend_url()
+        if api_client.backend_is_configured(backend_url):
+            decisions = [
+                {
+                    "id": v["id"],
+                    "accepted": v["decision"] == "accepted",
+                    "authenticity_score": v["authenticity_score"],
+                }
+                for v in st.session_state.variations
+            ]
+            # usar el session_id que devolvió /generate (el de ellos), no el nuestro
+            feedback_session_id = st.session_state.get("backend_session_id") or st.session_state.session_id
+            api_client.send_feedback(backend_url, feedback_session_id, decisions)
+
         time.sleep(0.2)
 
     st.session_state.screen = "report"

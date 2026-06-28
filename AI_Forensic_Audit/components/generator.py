@@ -22,6 +22,7 @@ import streamlit as st
 
 from utils import session as session_utils
 from utils import inference
+from utils import api_client
 
 MODELO_GENERATIVO_DIR = Path(__file__).resolve().parent.parent / "modelo_generativo"
 
@@ -60,6 +61,7 @@ def _render_frame(placeholder, img_uri: str, label: str, pct: int):
 
 def render_generator():
     img_uri = _img_data_uri(st.session_state.uploaded_image_path)
+    backend_url = api_client.get_backend_url()
 
     _, mid, _ = st.columns([1, 3, 1])
     with mid:
@@ -72,12 +74,15 @@ def render_generator():
 
         # Fase 2 — generación real (mock o modelo del equipo, según loader.py)
         _render_frame(placeholder, img_uri, PHASE_2, 12)
-        variations = inference.generate_variations(
+        variations, backend_session_id, source = inference.generate_variations(
             input_image_path=Path(st.session_state.uploaded_image_path),
             output_dir=session_utils.get_subdir("output"),
             model_folder=MODELO_GENERATIVO_DIR,
+            backend_url=backend_url,
         )
         st.session_state.variations = variations
+        st.session_state.backend_session_id = backend_session_id
+        st.session_state.generation_source = source
         for pct in (55, 85, 100):
             _render_frame(placeholder, img_uri, PHASE_2, pct)
             time.sleep(0.11)

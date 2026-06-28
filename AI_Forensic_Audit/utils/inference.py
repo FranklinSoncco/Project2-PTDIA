@@ -29,6 +29,7 @@ from typing import Optional
 from PIL import Image, ImageEnhance
 
 from . import loader
+from . import api_client
 
 N_VARIATIONS = 5
 
@@ -95,13 +96,47 @@ def generate_variations(
     output_dir: Path,
     model_folder: Optional[Path] = None,
     n: int = N_VARIATIONS,
-) -> list[dict]:
+    backend_url: Optional[str] = None,
+) -> tuple[list[dict], Optional[str], str]:
+    """Devuelve (variaciones_guardadas, backend_session_id, source).
+    `source` es "backend" | "local_model" | "mock" — para poder mostrar
+    en la interfaz, sin adivinar, qué se usó realmente en cada corrida.
+    `backend_session_id` es el session_id que devolvió el backend
+    externo (None si no se usó) — hay que reenviarlo tal cual en /feedback.
+    """
     original = Image.open(input_image_path).convert("RGB")
 
-    model = loader.load_model(model_folder) if model_folder else None
-    results = run_custom_generative_model(model, original, n) if model is not None else []
+    backend_session_id = None
+    results = []
+    source = "mock"
+
+    # 1) backend externo del equipo — prioridad si está configurado
+    if api_client.backend_is_configured(backend_url):
+        backend_result = api_client.call_generative_backend(backend_url, original, n)
+        if backend_result and backend_result["variations"]:
+            backend_session_id = backend_result["backend_session_id"]
+            source = "backend"
+            for item in backend_result["variations"]:
+                score = item["score"]
+                if score is None:
+                    # red de seguridad SOLO si el backend no mandó métrica —
+                    # no debería pasar una vez el equipo confirme el campo real.
+                    score = _diff_score(original, item["image"])
+                results.append((item["image"], score))
+
+    # 2) modelo local en /modelo_generativo, si no hubo backend o falló
+    if not results and model_folder:
+        model = loader.load_model(model_folder)
+        if model is not None:
+            local_results = run_custom_generative_model(model, original, n)
+            if local_results:
+                results = local_results
+                source = "local_model"
+
+    # 3) modo simulado — nunca deja la interfaz sin variaciones
     if not results:
         results = _mock_variations(original, n)
+        source = "mock"
 
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -120,7 +155,7 @@ def generate_variations(
                 "decision": None,
             }
         )
-    return saved
+    return saved, backend_session_id, source
 
 
 # --------------------------------------------------------------------------

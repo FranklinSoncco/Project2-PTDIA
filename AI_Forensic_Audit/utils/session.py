@@ -44,6 +44,8 @@ def init_session() -> str:
         st.session_state.variations = []
         st.session_state.current_index = 0
         st.session_state.report = None
+        st.session_state.backend_session_id = None
+        st.session_state.generation_source = None
         _create_dirs(session_id)
     return st.session_state.session_id
 

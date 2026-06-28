@@ -61,6 +61,61 @@ pudo ejecutar dentro del entorno donde se generó este proyecto (sin
 acceso a Hugging Face), así que está revisado por sintaxis pero no
 probado con una descarga real — pruébalo en tu máquina o en Colab.
 
+### Opción B: backend externo (lo que estamos usando ahora)
+
+El modelo generativo es pesado para correr en Streamlit Cloud (CPU,
+RAM limitada), así que el equipo lo expone como una API HTTP aparte y
+la interfaz solo le hace una llamada. La URL es **permanente**
+(confirmado por el equipo de modelo generativo), así que no debería
+cambiar entre despliegues.
+
+1. Copia `.streamlit/secrets.toml.example` a `.streamlit/secrets.toml`
+   (local) **o**, si ya está en Streamlit Cloud, pega la misma línea en
+   tu app → *Settings → Secrets*:
+   ```toml
+   BACKEND_URL = "https://uptake-pregnant-obstruct.ngrok-free.dev"
+   ```
+2. Listo — `utils/api_client.py` le hace `POST {BACKEND_URL}/generate`
+   con la imagen y decodifica las 5 variaciones (`image_b64`) que
+   devuelve. Si el backend no responde, cae automáticamente al modo
+   simulado.
+
+**Contrato confirmado** (`/generate`):
+```json
+{
+  "session_id": "ab12cd34",
+  "input_image": "/files/ab12cd34/input.png",
+  "reconstruction_b64": "<png base64>",
+  "variations": [
+    {"id": "V1", "label": "Mayor edad", "description": "...",
+     "image_path": "/files/ab12cd34/var_1.png", "image_b64": "<png base64>"}
+  ]
+}
+```
+- No incluye `authenticity_score` — se calcula **localmente**
+  (`utils/inference.py::_diff_score`), igual que en modo simulado.
+- El `session_id` que devuelven es **de ellos**, no el nuestro — se
+  guarda en `st.session_state.backend_session_id` y se reutiliza al
+  mandar `/feedback`, para que puedan correlacionar la auditoría de su
+  lado.
+- `label`/`description` por variación se guardan en memoria por si
+  más adelante quieres mostrarlos en la tarjeta (por ejemplo, "Mayor
+  edad" debajo del score) — hoy no se muestran en la UI ni se
+  escriben en `session.json` para no tocar ese formato.
+- `reconstruction_b64` no se usa todavía.
+
+**`/feedback`** — para no dejar un hueco del lado de ellos, al
+terminar las 5 decisiones se manda automáticamente:
+```json
+{"session_id": "<el de ellos>", "decisions": [
+  {"id": "V1", "accepted": true, "authenticity_score": 0.86}
+]}
+```
+Esto es independiente de **nuestro** `session.json` / resumen local,
+que se mantiene con el formato que ya tenían planeado (`decision`:
+`"accepted"`/`"rejected"`, `decision_time_seconds`, etc.) — ver sección 5.
+Si `/feedback` falla, solo se loguea; el reporte no depende de eso.
+
 ## 3. Estructura del proyecto
 
 ```
