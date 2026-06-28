@@ -37,11 +37,11 @@ def load_model(folder: Path) -> Optional[Any]:
     o None si no hay modelo disponible o falló la carga.
 
     IMPORTANTE: esta función carga los *pesos*, no construye la
-    arquitectura. Cuando el equipo entregue el modelo real, su forma de
-    usarlo (qué clase instanciar, cómo pasarle los pesos, qué método
-    llamar para inferencia) debe completarse en utils/inference.py ->
-    run_custom_generative_model() / run_custom_summary_model(). Esa es
-    la única función que debería cambiar al integrar el modelo final.
+    arquitectura. Para el modelo generativo (parte 2), si llega como
+    archivo en /modelo_generativo en vez de vía backend HTTP, complétalo
+    en utils/inference.py -> run_custom_generative_model(). El agente de
+    resumen (parte 4) ya no pasa por este loader — ver
+    utils/audit_agent.py y la sección 5.1 del README.
     """
     path = find_model_file(folder)
     if path is None:

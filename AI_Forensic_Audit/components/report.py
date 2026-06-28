@@ -14,6 +14,11 @@ BUILD_STEPS = [
 
 MODELO_RESUMEN_DIR = Path(__file__).resolve().parent.parent / "modelo_resumen"
 
+SUMMARY_BADGES = {
+    "agent": ("#5EEAD4", "resumen vía agente (Gemini)"),
+    "rule_based": ("#F5B95B", "resumen basado en reglas (sin agente)"),
+}
+
 
 def _render_progress(placeholder, label: str, pct: int):
     """Un solo bloque HTML por actualización (a propósito: concatenar
@@ -32,8 +37,8 @@ def _render_progress(placeholder, label: str, pct: int):
 
 
 def render_building():
-    """Animación + ejecución real del agente de resumen (parte 4 del
-    equipo, o el resumen basado en reglas si aún no llega)."""
+    """Animación + ejecución real del agente de resumen (AuditAgent /
+    Gemini si hay GEMINI_API_KEY, si no resumen basado en reglas)."""
     _, mid, _ = st.columns([1, 3, 1])
     with mid:
         placeholder = st.empty()
@@ -43,23 +48,24 @@ def render_building():
                 _render_progress(placeholder, label, pct)
                 time.sleep(0.1)
 
-        # build + persist the session JSON, then run the summary agent
+        # build + persist the session JSON (formato exacto que pide el agente),
+        # luego correr el agente de resumen
         session_json = json_manager.build_session_json(
             session_id=st.session_state.session_id,
             input_image_rel=f"inputs/{Path(st.session_state.uploaded_image_path).name}",
+            reconstruction_b64=st.session_state.reconstruction_b64,
             variations=st.session_state.variations,
         )
         json_path = session_utils.get_subdir("json") / "session.json"
         json_manager.save_json(session_json, json_path)
 
-        summary_text = inference.generate_summary(session_json, model_folder=MODELO_RESUMEN_DIR)
+        summary_result = inference.generate_summary(session_json, model_folder=MODELO_RESUMEN_DIR)
 
         st.session_state.session_json = session_json
-        st.session_state.summary_text = summary_text
+        st.session_state.summary_result = summary_result
 
         # envío "best effort" al backend del equipo — no bloquea ni rompe
         # el reporte si falla, porque el resumen ya se construyó localmente
-        # con NUESTRO formato (session.json no cambia por esto)
         backend_url = api_client.get_backend_url()
         if api_client.backend_is_configured(backend_url):
             decisions = [
@@ -85,37 +91,53 @@ def render_report():
     accepted = [v for v in variations if v["decision"] == "accepted"]
     rejected = [v for v in variations if v["decision"] == "rejected"]
     confidence = round(sum(v["authenticity_score"] for v in variations) / len(variations) * 100)
+    summary_result = st.session_state.summary_result
+    color, badge_label = SUMMARY_BADGES[summary_result["source"]]
 
     _, mid, _ = st.columns([1, 3, 1])
     with mid:
-        st.markdown(
-            f"""
-            <div class="dv-glass dv-fade-up" style="padding:34px;">
-              <h2 style="text-align:center;">Audit Summary</h2>
-              <p class="dv-mono" style="text-align:center; margin:6px 0 20px; font-size:12px;">
-                session · {st.session_state.session_id}
-              </p>
-              <div class="dv-report-grid">
-                <div class="dv-stat"><div class="num">{len(variations)}</div><div class="lbl">Variaciones</div></div>
-                <div class="dv-stat"><div class="num" style="color:#5EEAD4;">{len(accepted)}</div><div class="lbl">Aprobadas</div></div>
-                <div class="dv-stat"><div class="num" style="color:#F2545B;">{len(rejected)}</div><div class="lbl">Rechazadas</div></div>
-              </div>
-              <div style="display:flex; justify-content:space-between; font-family:'JetBrains Mono',monospace; font-size:11.5px; color:#5B6377; margin-bottom:6px;">
-                <span>CONFIDENCE</span><span>{confidence}%</span>
-              </div>
-              <div class="dv-confidence-bar"><span style="width:{confidence}%;"></span></div>
-              <div class="dv-explain">{st.session_state.summary_text}</div>
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
+        with st.container(key="report_card"):
+            st.markdown(
+                f"""
+                <h2 style="text-align:center;">Audit Summary</h2>
+                <p class="dv-mono" style="text-align:center; margin:6px 0 4px; font-size:12px;">
+                  session · {st.session_state.session_id}
+                </p>
+                <p style="text-align:center; margin-bottom:20px;">
+                  <span class="dv-mono" style="color:{color}; border:1px solid {color}55;
+                    padding:2px 10px; border-radius:999px; font-size:11px;">{badge_label}</span>
+                </p>
+                <div class="dv-report-grid">
+                  <div class="dv-stat"><div class="num">{len(variations)}</div><div class="lbl">Variaciones</div></div>
+                  <div class="dv-stat"><div class="num" style="color:#5EEAD4;">{len(accepted)}</div><div class="lbl">Aprobadas</div></div>
+                  <div class="dv-stat"><div class="num" style="color:#F2545B;">{len(rejected)}</div><div class="lbl">Rechazadas</div></div>
+                </div>
+                <div style="display:flex; justify-content:space-between; font-family:'JetBrains Mono',monospace; font-size:11.5px; color:#5B6377; margin-bottom:6px;">
+                  <span>CONFIDENCE</span><span>{confidence}%</span>
+                </div>
+                <div class="dv-confidence-bar"><span style="width:{confidence}%;"></span></div>
+                <div style="margin-top:18px;"></div>
+                """,
+                unsafe_allow_html=True,
+            )
+
+            if summary_result["source"] == "agent":
+                # texto real de Gemini con ## headers — se renderiza con
+                # markdown nativo de Streamlit para que se vea con formato,
+                # no como texto plano con '##' literal.
+                st.markdown(summary_result["text"])
+            else:
+                st.markdown(
+                    f'<div class="dv-explain">{summary_result["text"]}</div>',
+                    unsafe_allow_html=True,
+                )
 
         st.write("")
         b1, b2, b3 = st.columns(3)
         with b1:
             st.download_button(
                 "Export JSON",
-                data=_json_bytes(),
+                data=_export_json_bytes(),
                 file_name=f"{st.session_state.session_id}.json",
                 mime="application/json",
                 use_container_width=True,
@@ -134,15 +156,16 @@ def render_report():
                 st.rerun()
 
 
-def _json_bytes() -> bytes:
+def _export_json_bytes() -> bytes:
     import json as _json
-    return _json.dumps(st.session_state.session_json, indent=2, ensure_ascii=False).encode("utf-8")
+    data = json_manager.build_export_json(st.session_state.session_id, st.session_state.variations)
+    return _json.dumps(data, indent=2, ensure_ascii=False).encode("utf-8")
 
 
 def _report_txt() -> bytes:
     text = (
         f"DEVERITAS — Audit Summary\n"
         f"Session: {st.session_state.session_id}\n\n"
-        f"{st.session_state.summary_text}\n"
+        f"{st.session_state.summary_result['text']}\n"
     )
     return text.encode("utf-8")

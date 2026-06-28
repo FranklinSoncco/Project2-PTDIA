@@ -3,25 +3,22 @@ utils/inference.py
 -------------------
 Dos responsabilidades:
 
-1. generate_variations(): produce las 5 variaciones visuales + su score
-   de autenticidad. Si hay un modelo real en /modelo_generativo, se
-   delega a run_custom_generative_model() (que el equipo debe completar
-   según la arquitectura final). Si no hay modelo, se usa un generador
-   simulado con PIL para poder probar TODA la interfaz de punta a punta
-   hoy mismo, sin esperar al modelo del equipo.
+1. generate_variations(): produce las 5 variaciones visuales (imagen +
+   score + label + description) más reconstruction_b64, en el formato
+   exacto que necesita el agente de resumen. Prioridad: backend externo
+   -> modelo local en /modelo_generativo -> modo simulado. Nunca deja
+   la interfaz sin variaciones.
 
-2. generate_summary(): el agente de resumen (parte 4 del equipo). Si hay
-   un modelo real en /modelo_resumen, se delega a run_custom_summary_model().
-   Si no, se usa un resumen basado en reglas (determinístico, sin
-   dependencias, nunca falla) que ya combina la decisión humana con el
-   score del clasificador, tal como pide el enunciado del proyecto.
-
-Cuando lleguen los modelos reales del equipo, lo único que debería
-cambiar en este archivo son los dos `run_custom_*` — el resto del
-pipeline (sesión, JSON, limpieza, UI) no se toca.
+2. generate_summary(): el agente de resumen (parte 4 del equipo).
+   Prioridad: AuditAgent real (Gemini, ver utils/audit_agent.py) si hay
+   GEMINI_API_KEY configurada -> resumen basado en reglas (siempre
+   funciona, sin dependencias) si el agente real falla o no está
+   configurado.
 """
 
 from __future__ import annotations
+import base64
+import io
 import random
 from pathlib import Path
 from typing import Optional
@@ -30,6 +27,7 @@ from PIL import Image, ImageEnhance
 
 from . import loader
 from . import api_client
+from . import audit_agent
 
 N_VARIATIONS = 5
 
@@ -39,14 +37,10 @@ N_VARIATIONS = 5
 # --------------------------------------------------------------------------
 
 def run_custom_generative_model(model, image: Image.Image, n: int):
-    """Punto de integración para el modelo generativo real (parte 2 del
-    equipo). Debe devolver una lista de tuplas (PIL.Image, score_float)
-    de longitud `n`, o una lista vacía si no aplica todavía.
-
-    Implementación pendiente: instanciar la arquitectura correspondiente,
-    cargar `model` (ya viene como state_dict/tensores desde utils.loader)
-    y correr la inferencia real (p. ej. img2img / ControlNet / etc.).
-    """
+    """Punto de integración para el modelo generativo real si se entrega
+    como archivo de pesos en /modelo_generativo (alternativa al backend
+    HTTP). Debe devolver una lista de tuplas (PIL.Image, score_float) de
+    longitud `n`, o una lista vacía si no aplica todavía."""
     return []
 
 
@@ -57,10 +51,10 @@ def _hue_shift(img: Image.Image, shift_amount: int) -> Image.Image:
 
 
 def _diff_score(original: Image.Image, variant: Image.Image) -> float:
-    """Heurística simple para el modo simulado: a mayor diferencia
+    """Heurística simple usada como score local: a mayor diferencia
     perceptual frente a la imagen original, menor el score de
-    autenticidad. Esto es solo para que la demo tenga scores con algo
-    de lógica visible; el modelo real definirá su propio criterio."""
+    autenticidad. Se usa siempre que el backend no mande su propia
+    métrica (hoy el caso real) y también en modo simulado."""
     a = original.convert("RGB").resize((64, 64))
     b = variant.convert("RGB").resize((64, 64))
     pa, pb = list(a.getdata()), list(b.getdata())
@@ -70,24 +64,31 @@ def _diff_score(original: Image.Image, variant: Image.Image) -> float:
     return round(max(0.05, min(0.97, score)), 4)
 
 
+MOCK_RECIPES = [
+    ("Mayor saturación", "Variación simulada con mayor saturación de color.",
+     lambda im: ImageEnhance.Color(ImageEnhance.Contrast(im).enhance(1.08)).enhance(1.35)),
+    ("Tono más cálido", "Variación simulada con una iluminación más cálida.",
+     lambda im: ImageEnhance.Brightness(_hue_shift(im, 18)).enhance(1.06)),
+    ("Menor saturación", "Variación simulada con tono más apagado, estilo sepia.",
+     lambda im: ImageEnhance.Color(ImageEnhance.Brightness(im).enhance(1.04)).enhance(0.55)),
+    ("Tono más frío", "Variación simulada con una iluminación más fría.",
+     lambda im: ImageEnhance.Color(_hue_shift(im, 235)).enhance(0.85)),
+    ("Mayor contraste", "Variación simulada con mayor contraste y nitidez.",
+     lambda im: ImageEnhance.Sharpness(ImageEnhance.Contrast(im).enhance(1.22)).enhance(1.6)),
+]
+
+
 def _mock_variations(original: Image.Image, n: int):
-    """Genera `n` variaciones visualmente distintas con transformaciones
-    deterministas de PIL (no usa ningún modelo de IA). Suficiente para
-    probar carga de imagen -> tarjetas -> decisiones -> reporte sin
-    depender de pesos que aún no existen."""
-    recipes = [
-        lambda im: ImageEnhance.Color(ImageEnhance.Contrast(im).enhance(1.08)).enhance(1.35),
-        lambda im: ImageEnhance.Brightness(_hue_shift(im, 18)).enhance(1.06),
-        lambda im: ImageEnhance.Color(ImageEnhance.Brightness(im).enhance(1.04)).enhance(0.55),
-        lambda im: ImageEnhance.Color(_hue_shift(im, 235)).enhance(0.85),
-        lambda im: ImageEnhance.Sharpness(ImageEnhance.Contrast(im).enhance(1.22)).enhance(1.6),
-    ]
+    """Genera `n` variaciones con transformaciones deterministas de PIL
+    (sin ningún modelo de IA). label/description quedan parejos con la
+    transformación real aplicada, para que el agente de resumen tenga
+    algo coherente con qué trabajar incluso en modo simulado."""
     out = []
     for i in range(n):
-        recipe = recipes[i % len(recipes)]
+        label, description, recipe = MOCK_RECIPES[i % len(MOCK_RECIPES)]
         variant = recipe(original.copy())
         score = _diff_score(original, variant)
-        out.append((variant, score))
+        out.append({"image": variant, "score": score, "label": label, "description": description})
     return out
 
 
@@ -97,17 +98,25 @@ def generate_variations(
     model_folder: Optional[Path] = None,
     n: int = N_VARIATIONS,
     backend_url: Optional[str] = None,
-) -> tuple[list[dict], Optional[str], str]:
-    """Devuelve (variaciones_guardadas, backend_session_id, source).
-    `source` es "backend" | "local_model" | "mock" — para poder mostrar
-    en la interfaz, sin adivinar, qué se usó realmente en cada corrida.
-    `backend_session_id` es el session_id que devolvió el backend
-    externo (None si no se usó) — hay que reenviarlo tal cual en /feedback.
+) -> dict:
+    """Devuelve:
+        {
+          "variations": [ {id, image_path_abs, image_path, image_b64,
+                            label, description, authenticity_score,
+                            decision, decision_time_seconds}, ... ],
+          "backend_session_id": str | None,
+          "source": "backend" | "local_model" | "mock",
+          "reconstruction_b64": str,
+        }
+    `backend_session_id` es el que devolvió el backend externo — hay
+    que reenviarlo tal cual en /feedback. `reconstruction_b64` se
+    sintetiza localmente a partir de la imagen de entrada (el campo no
+    se usa en el contenido del reporte, solo se exige su presencia).
     """
     original = Image.open(input_image_path).convert("RGB")
 
     backend_session_id = None
-    results = []
+    items = []
     source = "mock"
 
     # 1) backend externo del equipo — prioridad si está configurado
@@ -122,52 +131,67 @@ def generate_variations(
                     # red de seguridad SOLO si el backend no mandó métrica —
                     # no debería pasar una vez el equipo confirme el campo real.
                     score = _diff_score(original, item["image"])
-                results.append((item["image"], score))
+                meta = item.get("meta") or {}
+                items.append({
+                    "image": item["image"],
+                    "score": score,
+                    "label": meta.get("label") or "Variación",
+                    "description": meta.get("description") or "",
+                })
 
     # 2) modelo local en /modelo_generativo, si no hubo backend o falló
-    if not results and model_folder:
+    if not items and model_folder:
         model = loader.load_model(model_folder)
         if model is not None:
             local_results = run_custom_generative_model(model, original, n)
             if local_results:
-                results = local_results
                 source = "local_model"
+                for img, score in local_results:
+                    items.append({"image": img, "score": score, "label": "Variación", "description": ""})
 
     # 3) modo simulado — nunca deja la interfaz sin variaciones
-    if not results:
-        results = _mock_variations(original, n)
+    if not items:
         source = "mock"
+        items = _mock_variations(original, n)
 
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
     saved = []
-    for i, (img, score) in enumerate(results, start=1):
+    for i, item in enumerate(items, start=1):
         vid = f"V{i}"
         out_path = output_dir / f"var_{i}.png"
-        img.save(out_path)
+        item["image"].save(out_path)
+        image_b64 = base64.b64encode(out_path.read_bytes()).decode("ascii")
         saved.append(
             {
                 "id": vid,
                 "image_path_abs": str(out_path),
                 "image_path": f"outputs/var_{i}.png",
-                "authenticity_score": score,
+                "image_b64": image_b64,
+                "label": item["label"],
+                "description": item["description"],
+                "authenticity_score": item["score"],
                 "decision": None,
+                "decision_time_seconds": None,
             }
         )
-    return saved, backend_session_id, source
+
+    recon_buf = io.BytesIO()
+    original.save(recon_buf, format="PNG")
+    reconstruction_b64 = base64.b64encode(recon_buf.getvalue()).decode("ascii")
+
+    return {
+        "variations": saved,
+        "backend_session_id": backend_session_id,
+        "source": source,
+        "reconstruction_b64": reconstruction_b64,
+    }
 
 
 # --------------------------------------------------------------------------
 # Summary / explanation agent
 # --------------------------------------------------------------------------
-
-def run_custom_summary_model(model, session_json: dict) -> str:
-    """Punto de integración para el agente de resumen real (parte 4 del
-    equipo, basado en LLM). Debe devolver el texto del resumen, o ''
-    si no aplica todavía."""
-    return ""
-
 
 def _rule_based_summary(session_json: dict) -> str:
     variations = session_json.get("variations", [])
@@ -214,10 +238,32 @@ def _rule_based_summary(session_json: dict) -> str:
     return "\n\n".join(lines)
 
 
-def generate_summary(session_json: dict, model_folder: Optional[Path] = None) -> str:
-    model = loader.load_model(model_folder) if model_folder else None
-    if model is not None:
-        text = run_custom_summary_model(model, session_json)
-        if text:
-            return text
-    return _rule_based_summary(session_json)
+def generate_summary(session_json: dict, model_folder: Optional[Path] = None) -> dict:
+    """Devuelve {"text": str, "source": "agent"|"rule_based",
+    "metrics": dict|None, "approved": bool|None}.
+
+    Intenta primero el AuditAgent real (Gemini, parte 4 del equipo). Si
+    no hay GEMINI_API_KEY configurada, o la llamada falla por cualquier
+    motivo (sin internet, cuota, formato inesperado), cae al resumen
+    basado en reglas — nunca rompe el reporte.
+    """
+    try:
+        api_key = audit_agent.get_gemini_api_key()
+        if api_key:
+            agent = audit_agent.AuditAgent()
+            result = agent.run(session_json)
+            return {
+                "text": result["report"],
+                "source": "agent",
+                "metrics": result["metrics"],
+                "approved": result["approved"],
+            }
+    except Exception as e:
+        print(f"[inference] AuditAgent (Gemini) no disponible, usando resumen local: {e}")
+
+    return {
+        "text": _rule_based_summary(session_json),
+        "source": "rule_based",
+        "metrics": None,
+        "approved": None,
+    }

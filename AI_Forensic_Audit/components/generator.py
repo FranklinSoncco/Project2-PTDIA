@@ -74,15 +74,16 @@ def render_generator():
 
         # Fase 2 — generación real (mock o modelo del equipo, según loader.py)
         _render_frame(placeholder, img_uri, PHASE_2, 12)
-        variations, backend_session_id, source = inference.generate_variations(
+        result = inference.generate_variations(
             input_image_path=Path(st.session_state.uploaded_image_path),
             output_dir=session_utils.get_subdir("output"),
             model_folder=MODELO_GENERATIVO_DIR,
             backend_url=backend_url,
         )
-        st.session_state.variations = variations
-        st.session_state.backend_session_id = backend_session_id
-        st.session_state.generation_source = source
+        st.session_state.variations = result["variations"]
+        st.session_state.backend_session_id = result["backend_session_id"]
+        st.session_state.generation_source = result["source"]
+        st.session_state.reconstruction_b64 = result["reconstruction_b64"]
         for pct in (55, 85, 100):
             _render_frame(placeholder, img_uri, PHASE_2, pct)
             time.sleep(0.11)

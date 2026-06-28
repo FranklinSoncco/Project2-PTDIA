@@ -120,10 +120,11 @@ Si `/feedback` falla, solo se loguea; el reporte no depende de eso.
 
 ```
 AI_Forensic_Audit/
-├── app.py                  # orquesta el state machine de pantallas
-├── requirements.txt        # streamlit + pillow + numpy (modo simulado)
-├── requirements-models.txt # torch/diffusers/transformers (modelos reales)
-├── download_models.py      # descarga un modelo abierto de prueba
+├── app.py                     # orquesta el state machine de pantallas
+├── requirements.txt           # streamlit + pillow + numpy + requests + google-generativeai
+├── requirements-models.txt    # torch/diffusers/transformers (modelo generativo local, opcional)
+├── download_models.py         # descarga un modelo abierto de prueba (alternativa al backend)
+├── test_backend_connection.py # prueba /generate directo contra el backend real + guarda imágenes
 │
 ├── assets/
 │   ├── logo.svg             # logo (escudo + ojo + red neuronal + check)
@@ -141,14 +142,17 @@ AI_Forensic_Audit/
 ├── utils/
 │   ├── session.py            # UUID + carpetas por sesión (multi-usuario)
 │   ├── cleanup.py            # destruye datos al terminar / sesiones abandonadas
-│   ├── json_manager.py       # construye/lee el JSON de auditoría
+│   ├── json_manager.py       # construye/lee el JSON de auditoría (formato del agente)
 │   ├── loader.py             # carga .safetensors/.pth/.pkl con fallback a mock
-│   ├── inference.py          # generación + resumen (mock y hooks reales)
+│   ├── inference.py          # generación + resumen (mock, backend, hooks reales)
+│   ├── api_client.py         # cliente HTTP del backend externo (/generate, /feedback)
+│   ├── audit_agent.py        # AuditAgent real (Gemini) — parte 4, reimplementado del notebook
 │   ├── svg.py                # logo, íconos propios, dial de score
 │   └── styling.py            # inyección del CSS global
 │
-├── modelo_generativo/        # coloca aquí el modelo de la parte 2
-├── modelo_resumen/           # coloca aquí el modelo de la parte 4
+├── modelo_generativo/        # alternativa local al backend (parte 2), opcional
+├── modelo_resumen/
+│   └── agent.pkl              # el que entregó el equipo — solo de referencia, ver sección 5.1
 └── sessions/                 # se crea en runtime, una carpeta UUID por usuario
 ```
 
@@ -178,28 +182,81 @@ imágenes, variaciones o decisiones se mezclen.
 
 ## 5. Formato del JSON de auditoría
 
-El que consume el agente de resumen (parte 4) — actualizado por el
-equipo a nombres en inglés, con la métrica de tiempo de decisión:
+**Actualizado de nuevo** por el equipo de NLP (parte 4) — ahora coincide
+exactamente con la salida de `/generate` (label/description/image_b64/
+reconstruction_b64) más lo que agrega nuestra interfaz:
 
 ```json
 {
   "session_id": "audit_a1b2c3d4e5",
   "input_image": "inputs/source.jpg",
+  "reconstruction_b64": "<png base64>",
   "variations": [
     {
       "id": "V1",
+      "label": "Mayor edad",
+      "description": "Variación con rasgos de mayor edad.",
       "image_path": "outputs/var_1.png",
-      "authenticity_score": 0.86,
+      "image_b64": "<png base64>",
       "decision": "accepted",
-      "decision_time_seconds": 5.8
+      "decision_time_seconds": 5.8,
+      "authenticity_score": 0.86
     }
   ]
 }
 ```
 
-`decision` es `"accepted"` o `"rejected"`. `decision_time_seconds` se
-mide desde que la variación aparece en pantalla hasta que el usuario
-hace clic en aprobar/rechazar (`utils/session.py` + `components/cards.py`).
+- `decision` es `"accepted"` o `"rejected"`. `decision_time_seconds` se
+  mide desde que la variación aparece en pantalla hasta que el usuario
+  decide (`components/cards.py`).
+- `authenticity_score` es **extra** (el agente de resumen no la exige
+  ni la usa), pero la seguimos calculando e incluyendo porque la
+  necesitamos para nuestra propia interfaz/reporte.
+- `label`/`description` vienen del backend de generación cuando está
+  disponible; en modo simulado se generan localmente y coinciden con
+  la transformación de PIL aplicada.
+- Este JSON (con los base64 completos) es el que se guarda en
+  `sessions/<id>/json/session.json` y se le pasa al agente de resumen.
+  El botón **Export JSON** de la interfaz descarga una versión más
+  liviana, sin los base64 (`json_manager.build_export_json`), pensada
+  para que una persona la pueda abrir y leer.
+
+## 5.1. Agente de resumen real (Gemini)
+
+El equipo de NLP entregó `agent.pkl` + un notebook de prueba
+(`proyecto2_agente.ipynb`). Ese `.pkl` pesa 41 bytes — es una instancia
+**vacía** de una clase `AuditAgent` (sin estado propio); la lógica real
+vive en funciones del notebook que llaman a Gemini. Por eso
+`utils/audit_agent.py` **reimplementa esas funciones directamente**
+(palabra por palabra según el notebook) en vez de deserializar el
+`.pkl` — es exactamente equivalente, pero sin la fragilidad de
+depender de `pickle.load()` resolviendo una clase que vivía en
+`__main__` del notebook original. El `.pkl` se conserva en
+`modelo_resumen/` solo como referencia/documentación.
+
+**Para activarlo:** agrega a tus secrets:
+```toml
+GEMINI_API_KEY = "tu-api-key-real"
+```
+Si no está configurada, o la llamada a Gemini falla por cualquier
+motivo, la interfaz cae automáticamente al resumen basado en reglas —
+nunca rompe el reporte. La interfaz muestra cuál se usó (`resumen vía
+agente (Gemini)` / `resumen basado en reglas`), igual que con la fuente
+de las imágenes.
+
+⚠️ **Importante — seguridad**: el notebook que compartió el equipo
+tenía la API key de Gemini escrita en texto plano dentro del código.
+**Pídeles que la roten antes de subir ese notebook a cualquier repo**
+(una key hardcodeada queda expuesta para siempre en el historial de
+git, incluso si después se borra del archivo).
+
+⚠️ **SDK deprecado**: `google.generativeai` (lo que usa el notebook)
+ya no recibe actualizaciones de Google, que migró a un SDK unificado
+nuevo (`google-genai`). Se dejó el código tal cual lo probó el equipo,
+porque es lo único que confirmamos que funciona de verdad — yo no
+tengo acceso a la API de Gemini desde mi entorno para probar una
+migración. Si en algún momento deja de funcionar, la migración es
+mecánica (ver `utils/audit_agent.py`).
 
 ## 6. Identidad visual
 

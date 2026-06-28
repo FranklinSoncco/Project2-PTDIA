@@ -90,6 +90,16 @@ body, .stApp {
 .st-key-accept_btn button:hover{ border-color: var(--cyan) !important; box-shadow: 0 8px 24px rgba(94,234,212,0.25) !important; transform: translateY(-2px); }
 .st-key-reject_btn button:hover{ border-color: var(--danger) !important; box-shadow: 0 8px 24px rgba(242,84,91,0.25) !important; transform: translateY(-2px); }
 
+.st-key-report_card{
+  background: var(--glass) !important;
+  border: 1px solid var(--border) !important;
+  border-radius: var(--radius-lg) !important;
+  padding: 34px !important;
+  box-shadow: var(--shadow-glass) !important;
+}
+.st-key-report_card [data-testid="stMarkdownContainer"] h2{ font-size: 22px; }
+.st-key-report_card [data-testid="stMarkdownContainer"] strong{ color: var(--text-primary); }
+
 [data-testid="stMarkdownContainer"] p { margin-bottom: 0; }
 """
 

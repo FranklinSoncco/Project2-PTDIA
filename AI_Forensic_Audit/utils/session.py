@@ -46,6 +46,8 @@ def init_session() -> str:
         st.session_state.report = None
         st.session_state.backend_session_id = None
         st.session_state.generation_source = None
+        st.session_state.reconstruction_b64 = None
+        st.session_state.summary_result = None
         _create_dirs(session_id)
     return st.session_state.session_id
 
