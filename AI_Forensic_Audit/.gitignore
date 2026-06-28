@@ -1,0 +1,17 @@
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# datos de sesión: nunca deben versionarse (son temporales por diseño)
+sessions/*
+!sessions/.gitkeep
+
+# pesos de modelos: pesan demasiado para git — se descargan con download_models.py
+modelo_generativo/*
+!modelo_generativo/.gitkeep
+modelo_resumen/*
+!modelo_resumen/.gitkeep
+
+.streamlit/secrets.toml
+.DS_Store

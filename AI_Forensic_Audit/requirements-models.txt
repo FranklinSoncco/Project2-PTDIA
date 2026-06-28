@@ -1,0 +1,12 @@
+# Solo necesario para download_models.py y para correr modelos reales
+# (no se necesita para probar la interfaz en modo simulado).
+#
+#   pip install -r requirements.txt -r requirements-models.txt
+#   python download_models.py
+
+torch>=2.2
+diffusers>=0.27
+transformers>=4.40
+safetensors>=0.4
+huggingface_hub>=0.22
+accelerate>=0.30
