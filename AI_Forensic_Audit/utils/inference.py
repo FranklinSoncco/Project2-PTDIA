@@ -244,9 +244,12 @@ def generate_summary(session_json: dict, model_folder: Optional[Path] = None) ->
     en el formato exacto que exige el agente (con MAD/FID/LPIPS/ArcFace,
     ver utils/json_manager.py), así que se le pasa tal cual.
     """
+    error_detail = None
     try:
         api_key = audit_agent.get_gemini_api_key()
-        if api_key:
+        if not api_key:
+            error_detail = "GEMINI_API_KEY no está configurada en st.secrets."
+        else:
             agent = audit_agent.AuditAgent()
             result = agent.run(session_json)
             return {
@@ -254,9 +257,11 @@ def generate_summary(session_json: dict, model_folder: Optional[Path] = None) ->
                 "source": "agent",
                 "metrics": result["metrics"],
                 "approved": result.get("majority_accepted", result.get("approved")),
+                "error_detail": None,
             }
     except Exception as e:
-        print(f"[inference] AuditAgent (Gemini) no disponible, usando resumen local: {e}")
+        error_detail = f"{type(e).__name__}: {e}"
+        print(f"[inference] AuditAgent (Gemini) no disponible, usando resumen local: {error_detail}")
 
     # el resumen basado en reglas usa nuestras claves internas (MAD ya
     # viene con ese nombre en session_json -- ver json_manager)
@@ -265,4 +270,5 @@ def generate_summary(session_json: dict, model_folder: Optional[Path] = None) ->
         "source": "rule_based",
         "metrics": None,
         "approved": None,
+        "error_detail": error_detail,
     }
