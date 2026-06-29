@@ -259,6 +259,18 @@ LPIPS, ArcFace) a la vez puede:
 - quedarse sin memoria en tiempo de ejecución (el proceso se reinicia solo,
   sin aviso claro al usuario).
 
+⚠️ **Gotcha real ya encontrado en producción — opencv duplicado**:
+`insightface` exige `opencv-python` como dependencia propia. Si además
+fijas `opencv-python-headless` en `requirements.txt` (lo cual parece
+buena práctica para un server sin pantalla), `pip`/`uv` instala **los
+dos** — y como ambos paquetes instalan archivos bajo el mismo paquete
+`cv2/`, se pisan entre sí y corrompen la instalación. Esto causó un
+`ImportError` real al importar `utils/` (el traceback culpaba a
+`cv2/utils/__init__.py`, nada que ver con nuestro código). La regla:
+**nunca fijes `opencv-python` u `opencv-python-headless` a mano si ya
+tienes una librería (como insightface) que declare una de las dos como
+dependencia propia** — déjala instalar la que necesite.
+
 No pude probar la descarga real de ninguno de los 3 modelos desde mi
 entorno (la red del sandbox bloquea `download.pytorch.org` y los
 *release assets* de GitHub) — sí verifiqué la lógica matemática de
