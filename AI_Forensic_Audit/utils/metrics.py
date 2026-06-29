@@ -138,6 +138,21 @@ def _inception_features(model, images: list) -> np.ndarray:
     return feats.numpy()
 
 
+def _sqrtm_compat(linalg_module, matrix: np.ndarray) -> np.ndarray:
+    """scipy>=1.18 eliminó el parámetro `disp` de sqrtm() y ahora siempre
+    devuelve el array directamente (antes, con disp=False, devolvía una
+    tupla (resultado, error_estimado)). Esta función funciona con ambas
+    versiones -- el bug real visto en producción ("sqrtm() got an
+    unexpected keyword argument 'disp'") viene de aquí."""
+    try:
+        result = linalg_module.sqrtm(matrix, disp=False)
+    except TypeError:
+        result = linalg_module.sqrtm(matrix)
+    if isinstance(result, tuple):
+        return result[0]
+    return result
+
+
 def compute_fid_session(original: Image.Image, variants: list) -> float:
     """Un solo valor para toda la sesión — repetir en las 5 variaciones."""
     try:
@@ -153,11 +168,11 @@ def compute_fid_session(original: Image.Image, variants: list) -> float:
         sigma_gen = np.cov(gen_feats, rowvar=False)
 
         diff = mu_real - mu_gen
-        covmean, _ = linalg.sqrtm(sigma_real.dot(sigma_gen), disp=False)
+        covmean = _sqrtm_compat(linalg, sigma_real.dot(sigma_gen))
         if not np.isfinite(covmean).all():
             eps = 1e-6
             offset = np.eye(sigma_real.shape[0]) * eps
-            covmean = linalg.sqrtm((sigma_real + offset).dot(sigma_gen + offset))
+            covmean = _sqrtm_compat(linalg, (sigma_real + offset).dot(sigma_gen + offset))
         if np.iscomplexobj(covmean):
             covmean = covmean.real
 
