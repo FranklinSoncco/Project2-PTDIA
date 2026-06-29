@@ -14,9 +14,7 @@ scipy>=1.11
 lpips>=0.1.4
 insightface>=0.7
 onnxruntime>=1.16
-# insightface exige opencv-python (no headless) como dependencia propia
-# -- no se puede evitar desde requirements.txt. Eso causaba
-# "ImportError: libGL.so.1: cannot open shared object file" en Streamlit
-# Cloud (no trae esa librería de sistema por defecto). Arreglo real:
-# packages.txt con "libgl1" EN LA RAÍZ DEL REPO (no aquí adentro) -- ver
-# README sección 5.1.
+# NO fijar opencv-python-headless aparte: insightface ya exige
+# opencv-python como dependencia propia. Tener ambos instalados a la vez
+# corrompe el paquete cv2 (archivos de uno pisan al otro) -- esto fue
+# justo lo que rompió el despliegue (ImportError al importar utils/).

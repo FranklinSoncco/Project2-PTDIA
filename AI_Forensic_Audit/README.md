@@ -259,42 +259,17 @@ LPIPS, ArcFace) a la vez puede:
 - quedarse sin memoria en tiempo de ejecución (el proceso se reinicia solo,
   sin aviso claro al usuario).
 
-⚠️ **Gotcha real ya encontrado en producción — `libGL.so.1` faltante**:
-`insightface` exige `opencv-python` (la versión completa, no `headless`)
-como dependencia propia — no hay forma de evitarlo desde
-`requirements.txt`. El problema es que Streamlit Community Cloud corre
-en un contenedor sin librerías gráficas de sistema, y `opencv-python`
-necesita `libGL.so.1` con solo para *importarse* (aunque nunca abras
-una ventana). Resultado real visto en logs:
-```
-ImportError: libGL.so.1: cannot open shared object file: No such file or directory
-```
-(mi primer intento de arreglo — quitar `opencv-python-headless` de
-`requirements.txt` — no resolvía esto; de hecho era irrelevante, el
-problema nunca fue un conflicto de archivos entre los dos paquetes de
-opencv, sino esta librería de sistema faltante).
-
-**La solución real, confirmada en la documentación oficial de
-Streamlit** ([docs.streamlit.io/knowledge-base/dependencies/libgl](https://docs.streamlit.io/knowledge-base/dependencies/libgl)):
-crear un archivo `packages.txt` con la línea `libgl1`, para que
-Streamlit Cloud lo instale vía `apt-get` junto con las dependencias de
-Python.
-
-⚠️ **Importante sobre la ubicación**: a diferencia de `requirements.txt`
-(que puede ir junto a `app.py` o en la raíz del repo), **`packages.txt`
-solo funciona si está en la RAÍZ del repositorio** — no dentro de
-`AI_Forensic_Audit/`. Es una limitación conocida de Streamlit Cloud
-(ver [issue #9756](https://github.com/streamlit/streamlit/issues/9756)).
-Como tu repo tiene `AI_Forensic_Audit/` como subcarpeta, el archivo va
-**un nivel arriba**, al lado de esa carpeta:
-```
-project2-ptdia/              <- raíz del repo
-├── packages.txt             <- AQUÍ, con una sola línea: libgl1
-└── AI_Forensic_Audit/
-    ├── app.py
-    ├── requirements.txt
-    └── ...
-```
+⚠️ **Gotcha real ya encontrado en producción — opencv duplicado**:
+`insightface` exige `opencv-python` como dependencia propia. Si además
+fijas `opencv-python-headless` en `requirements.txt` (lo cual parece
+buena práctica para un server sin pantalla), `pip`/`uv` instala **los
+dos** — y como ambos paquetes instalan archivos bajo el mismo paquete
+`cv2/`, se pisan entre sí y corrompen la instalación. Esto causó un
+`ImportError` real al importar `utils/` (el traceback culpaba a
+`cv2/utils/__init__.py`, nada que ver con nuestro código). La regla:
+**nunca fijes `opencv-python` u `opencv-python-headless` a mano si ya
+tienes una librería (como insightface) que declare una de las dos como
+dependencia propia** — déjala instalar la que necesite.
 
 No pude probar la descarga real de ninguno de los 3 modelos desde mi
 entorno (la red del sandbox bloquea `download.pytorch.org` y los
