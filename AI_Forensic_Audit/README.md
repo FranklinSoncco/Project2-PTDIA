@@ -145,6 +145,7 @@ AI_Forensic_Audit/
 │   ├── json_manager.py       # construye/lee el JSON de auditoría (formato del agente)
 │   ├── loader.py             # carga .safetensors/.pth/.pkl con fallback a mock
 │   ├── inference.py          # generación + resumen (mock, backend, hooks reales)
+│   ├── metrics.py            # MAD, FID, LPIPS, ArcFace — calculadas siempre localmente
 │   ├── api_client.py         # cliente HTTP del backend externo (/generate, /feedback)
 │   ├── audit_agent.py        # AuditAgent real (Gemini) — parte 4, reimplementado del notebook
 │   ├── svg.py                # logo, íconos propios, dial de score
@@ -182,9 +183,8 @@ imágenes, variaciones o decisiones se mezclen.
 
 ## 5. Formato del JSON de auditoría
 
-**Actualizado de nuevo** por el equipo de NLP (parte 4) — ahora coincide
-exactamente con la salida de `/generate` (label/description/image_b64/
-reconstruction_b64) más lo que agrega nuestra interfaz:
+**Actualizado de nuevo** por el equipo de NLP (parte 4) — ahora exige 4
+métricas visuales por variación además de todo lo anterior:
 
 ```json
 {
@@ -200,7 +200,10 @@ reconstruction_b64) más lo que agrega nuestra interfaz:
       "image_b64": "<png base64>",
       "decision": "accepted",
       "decision_time_seconds": 5.8,
-      "authenticity_score": 0.86
+      "MAD": 0.86,
+      "FID": 12.4,
+      "LPIPS": 0.18,
+      "ArcFace": 0.93
     }
   ]
 }
@@ -209,30 +212,80 @@ reconstruction_b64) más lo que agrega nuestra interfaz:
 - `decision` es `"accepted"` o `"rejected"`. `decision_time_seconds` se
   mide desde que la variación aparece en pantalla hasta que el usuario
   decide (`components/cards.py`).
-- `authenticity_score` es **extra** (el agente de resumen no la exige
-  ni la usa), pero la seguimos calculando e incluyendo porque la
-  necesitamos para nuestra propia interfaz/reporte.
-- `label`/`description` vienen del backend de generación cuando está
-  disponible; en modo simulado se generan localmente y coinciden con
-  la transformación de PIL aplicada.
+- **Sobre el nombre `MAD`**: el agente lo exige con ese nombre exacto
+  (su `validate_session_data` lo busca como `"MAD"`, no como
+  `"authenticity_score"` — su propio *prompt* incluso le dice al LLM
+  *"No uses el término authenticity_score. Usa MAD"*). Internamente
+  seguimos llamándola `authenticity_score` en nuestra UI ("AUTHENTICITY
+  SCORE"); solo se renombra a `"MAD"` al construir este JSON
+  (`utils/json_manager.py`). Es la misma heurística de siempre.
+- `FID` es una métrica **de sesión**, no por imagen — se calcula una
+  sola vez (imagen real vs. el conjunto de las 5 variaciones) y ese
+  mismo valor se repite en las 5, tal como espera el agente.
+- `LPIPS` y `ArcFace` sí son por variación.
+- Rangos exigidos por `validate_session_data` (si no se respetan, el
+  agente *rechaza* el JSON): `MAD∈[0,1]`, `FID≥0`, `LPIPS∈[0,1]`,
+  `ArcFace∈[-1,1]`. `utils/metrics.py` ya garantiza estos rangos
+  siempre, incluso en modo de respaldo.
 - Este JSON (con los base64 completos) es el que se guarda en
   `sessions/<id>/json/session.json` y se le pasa al agente de resumen.
   El botón **Export JSON** de la interfaz descarga una versión más
-  liviana, sin los base64 (`json_manager.build_export_json`), pensada
-  para que una persona la pueda abrir y leer.
+  liviana, sin los base64, pensada para que una persona la pueda abrir
+  y leer.
 
-## 5.1. Agente de resumen real (Gemini)
+## 5.1. Las 4 métricas (MAD, FID, LPIPS, ArcFace) — `utils/metrics.py`
+
+Se calculan **siempre localmente en la interfaz**, apenas llegan las 5
+imágenes (sin importar si vinieron del backend, de un modelo local o
+del modo simulado) — así se decidió, en vez de depender de que el
+backend mande su propia métrica.
+
+| Métrica | Librería | Qué mide | Por variación o por sesión |
+|---|---|---|---|
+| MAD | propia (PIL/numpy) | cercanía de píxeles con el original | por variación |
+| FID | `torchvision` (InceptionV3) + `scipy` | distancia de distribución vs. dominio real | **de sesión** (repetida en las 5) |
+| LPIPS | `lpips` (backbone `squeeze`) | distancia perceptual aprendida | por variación |
+| ArcFace | `insightface` (`buffalo_l`) | preservación de identidad (similitud coseno) | por variación |
+
+Las 4 se muestran en la tarjeta de evaluación, verticales al costado
+de la imagen.
+
+⚠️ **Riesgo real de despliegue — leer antes de subir esto a producción**:
+`torch` + `torchvision` + `lpips` + `insightface` + `opencv` son
+pesadas. Streamlit Community Cloud (plan gratis) da 1 GB de RAM, sin
+GPU, y un *build* con límite de tiempo. Cargar los 3 modelos (Inception,
+LPIPS, ArcFace) a la vez puede:
+- hacer que el *build* tarde varios minutos o falle por espacio,
+- quedarse sin memoria en tiempo de ejecución (el proceso se reinicia solo,
+  sin aviso claro al usuario).
+
+No pude probar la descarga real de ninguno de los 3 modelos desde mi
+entorno (la red del sandbox bloquea `download.pytorch.org` y los
+*release assets* de GitHub) — sí verifiqué la lógica matemática de
+cada métrica con datos sintéticos, y que **si un modelo falla en
+cargar, la interfaz cae a un valor de respaldo seguro dentro del rango
+exigido en vez de romperse** (ver `utils/metrics.py`). Pero la
+*calidad real* de las 3 métricas pesadas solo se puede confirmar
+desplegando de verdad. Si ves errores de memoria en producción:
+- Lo más probable es que sea por esto, no por un bug.
+- Mitigación rápida: probar primero solo con MAD activo (comentar las
+  otras 3 llamadas en `compute_all_metrics`) para aislar cuál pesa más.
+- Mitigación de fondo: mover FID/LPIPS/ArcFace al backend (que sí tiene
+  GPU) en vez de la interfaz, si esto se vuelve bloqueante.
+
+## 5.2. Agente de resumen real (Gemini)
 
 El equipo de NLP entregó `agent.pkl` + un notebook de prueba
-(`proyecto2_agente.ipynb`). Ese `.pkl` pesa 41 bytes — es una instancia
+(`Agente.ipynb`). Ese `.pkl` pesa 41 bytes — es una instancia
 **vacía** de una clase `AuditAgent` (sin estado propio); la lógica real
 vive en funciones del notebook que llaman a Gemini. Por eso
 `utils/audit_agent.py` **reimplementa esas funciones directamente**
-(palabra por palabra según el notebook) en vez de deserializar el
-`.pkl` — es exactamente equivalente, pero sin la fragilidad de
-depender de `pickle.load()` resolviendo una clase que vivía en
-`__main__` del notebook original. El `.pkl` se conserva en
-`modelo_resumen/` solo como referencia/documentación.
+(palabra por palabra según el notebook, incluida la validación estricta
+de rangos de MAD/FID/LPIPS/ArcFace) en vez de deserializar el `.pkl` —
+es exactamente equivalente, pero sin la fragilidad de depender de
+`pickle.load()` resolviendo una clase que vivía en `__main__` del
+notebook original. El `.pkl` se conserva en `modelo_resumen/` solo como
+referencia/documentación.
 
 **Para activarlo:** agrega a tus secrets:
 ```toml
@@ -244,11 +297,9 @@ nunca rompe el reporte. La interfaz muestra cuál se usó (`resumen vía
 agente (Gemini)` / `resumen basado en reglas`), igual que con la fuente
 de las imágenes.
 
-⚠️ **Importante — seguridad**: el notebook que compartió el equipo
-tenía la API key de Gemini escrita en texto plano dentro del código.
-**Pídeles que la roten antes de subir ese notebook a cualquier repo**
-(una key hardcodeada queda expuesta para siempre en el historial de
-git, incluso si después se borra del archivo).
+✅ Esta versión del notebook ya **no** hardcodea la API key (usa
+`google.colab.userdata`) — bien hecho por el equipo, a diferencia de la
+entrega anterior.
 
 ⚠️ **SDK deprecado**: `google.generativeai` (lo que usa el notebook)
 ya no recibe actualizaciones de Google, que migró a un SDK unificado

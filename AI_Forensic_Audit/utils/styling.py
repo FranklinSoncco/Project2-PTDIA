@@ -26,7 +26,7 @@ STREAMLIT_OVERRIDES_TEMPLATE = """
 @import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap');
 
 #MainMenu, header, footer { visibility: hidden; }
-.block-container { padding-top: 1.2rem; max-width: 760px; }
+.block-container { padding-top: 1.2rem; max-width: 920px; }
 body, .stApp {
   background: var(--bg);
   background-image:

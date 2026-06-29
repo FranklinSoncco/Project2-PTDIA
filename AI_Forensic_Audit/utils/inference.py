@@ -4,10 +4,13 @@ utils/inference.py
 Dos responsabilidades:
 
 1. generate_variations(): produce las 5 variaciones visuales (imagen +
-   score + label + description) más reconstruction_b64, en el formato
-   exacto que necesita el agente de resumen. Prioridad: backend externo
-   -> modelo local en /modelo_generativo -> modo simulado. Nunca deja
-   la interfaz sin variaciones.
+   label + description) más reconstruction_b64. Prioridad: backend
+   externo -> modelo local en /modelo_generativo -> modo simulado.
+   Nunca deja la interfaz sin variaciones. Las 4 métricas (MAD, FID,
+   LPIPS, ArcFace) se calculan SIEMPRE de forma local en este módulo
+   (utils/metrics.py), sin importar de dónde vinieron las imágenes —
+   tal como se decidió: "todas las métricas las implementamos de
+   manera local para mostrarlo en la interfaz".
 
 2. generate_summary(): el agente de resumen (parte 4 del equipo).
    Prioridad: AuditAgent real (Gemini, ver utils/audit_agent.py) si hay
@@ -19,7 +22,6 @@ Dos responsabilidades:
 from __future__ import annotations
 import base64
 import io
-import random
 from pathlib import Path
 from typing import Optional
 
@@ -28,6 +30,7 @@ from PIL import Image, ImageEnhance
 from . import loader
 from . import api_client
 from . import audit_agent
+from . import metrics
 
 N_VARIATIONS = 5
 
@@ -39,8 +42,10 @@ N_VARIATIONS = 5
 def run_custom_generative_model(model, image: Image.Image, n: int):
     """Punto de integración para el modelo generativo real si se entrega
     como archivo de pesos en /modelo_generativo (alternativa al backend
-    HTTP). Debe devolver una lista de tuplas (PIL.Image, score_float) de
-    longitud `n`, o una lista vacía si no aplica todavía."""
+    HTTP). Debe devolver una lista de `n` PIL.Image, o [] si no aplica
+    todavía. (Las métricas ya NO se reciben de aquí: se calculan
+    siempre localmente en utils/metrics.py.)
+    """
     return []
 
 
@@ -48,20 +53,6 @@ def _hue_shift(img: Image.Image, shift_amount: int) -> Image.Image:
     h, s, v = img.convert("HSV").split()
     h = h.point(lambda x: (x + shift_amount) % 256)
     return Image.merge("HSV", (h, s, v)).convert("RGB")
-
-
-def _diff_score(original: Image.Image, variant: Image.Image) -> float:
-    """Heurística simple usada como score local: a mayor diferencia
-    perceptual frente a la imagen original, menor el score de
-    autenticidad. Se usa siempre que el backend no mande su propia
-    métrica (hoy el caso real) y también en modo simulado."""
-    a = original.convert("RGB").resize((64, 64))
-    b = variant.convert("RGB").resize((64, 64))
-    pa, pb = list(a.getdata()), list(b.getdata())
-    diff = sum(abs(p1[c] - p2[c]) for p1, p2 in zip(pa, pb) for c in range(3))
-    norm = diff / (64 * 64 * 3 * 255)
-    score = 1 - norm * 1.8 + random.uniform(-0.05, 0.05)
-    return round(max(0.05, min(0.97, score)), 4)
 
 
 MOCK_RECIPES = [
@@ -87,8 +78,7 @@ def _mock_variations(original: Image.Image, n: int):
     for i in range(n):
         label, description, recipe = MOCK_RECIPES[i % len(MOCK_RECIPES)]
         variant = recipe(original.copy())
-        score = _diff_score(original, variant)
-        out.append({"image": variant, "score": score, "label": label, "description": description})
+        out.append({"image": variant, "label": label, "description": description})
     return out
 
 
@@ -103,6 +93,7 @@ def generate_variations(
         {
           "variations": [ {id, image_path_abs, image_path, image_b64,
                             label, description, authenticity_score,
+                            fid, lpips, arcface,
                             decision, decision_time_seconds}, ... ],
           "backend_session_id": str | None,
           "source": "backend" | "local_model" | "mock",
@@ -110,8 +101,12 @@ def generate_variations(
         }
     `backend_session_id` es el que devolvió el backend externo — hay
     que reenviarlo tal cual en /feedback. `reconstruction_b64` se
-    sintetiza localmente a partir de la imagen de entrada (el campo no
-    se usa en el contenido del reporte, solo se exige su presencia).
+    sintetiza localmente a partir de la imagen de entrada.
+
+    Las 4 métricas (authenticity_score=MAD, fid, lpips, arcface) se
+    calculan SIEMPRE aquí mismo, vía utils/metrics.py, sin importar si
+    las imágenes vinieron del backend, de un modelo local o del modo
+    simulado.
     """
     original = Image.open(input_image_path).convert("RGB")
 
@@ -126,15 +121,9 @@ def generate_variations(
             backend_session_id = backend_result["backend_session_id"]
             source = "backend"
             for item in backend_result["variations"]:
-                score = item["score"]
-                if score is None:
-                    # red de seguridad SOLO si el backend no mandó métrica —
-                    # no debería pasar una vez el equipo confirme el campo real.
-                    score = _diff_score(original, item["image"])
                 meta = item.get("meta") or {}
                 items.append({
                     "image": item["image"],
-                    "score": score,
                     "label": meta.get("label") or "Variación",
                     "description": meta.get("description") or "",
                 })
@@ -143,22 +132,25 @@ def generate_variations(
     if not items and model_folder:
         model = loader.load_model(model_folder)
         if model is not None:
-            local_results = run_custom_generative_model(model, original, n)
-            if local_results:
+            local_images = run_custom_generative_model(model, original, n)
+            if local_images:
                 source = "local_model"
-                for img, score in local_results:
-                    items.append({"image": img, "score": score, "label": "Variación", "description": ""})
+                for img in local_images:
+                    items.append({"image": img, "label": "Variación", "description": ""})
 
     # 3) modo simulado — nunca deja la interfaz sin variaciones
     if not items:
         source = "mock"
         items = _mock_variations(original, n)
 
+    # --- las 4 métricas, siempre calculadas localmente -----------------
+    metric_results = metrics.compute_all_metrics(original, [it["image"] for it in items])
+
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
     saved = []
-    for i, item in enumerate(items, start=1):
+    for i, (item, m) in enumerate(zip(items, metric_results), start=1):
         vid = f"V{i}"
         out_path = output_dir / f"var_{i}.png"
         item["image"].save(out_path)
@@ -171,7 +163,10 @@ def generate_variations(
                 "image_b64": image_b64,
                 "label": item["label"],
                 "description": item["description"],
-                "authenticity_score": item["score"],
+                "authenticity_score": m["MAD"],
+                "fid": m["FID"],
+                "lpips": m["LPIPS"],
+                "arcface": m["ArcFace"],
                 "decision": None,
                 "decision_time_seconds": None,
             }
@@ -198,8 +193,8 @@ def _rule_based_summary(session_json: dict) -> str:
     accepted = [v for v in variations if v.get("decision") == "accepted"]
     rejected = [v for v in variations if v.get("decision") == "rejected"]
 
-    avg_acc = sum(v["authenticity_score"] for v in accepted) / len(accepted) if accepted else 0
-    avg_rej = sum(v["authenticity_score"] for v in rejected) / len(rejected) if rejected else 0
+    avg_acc = sum(v["MAD"] for v in accepted) / len(accepted) if accepted else 0
+    avg_rej = sum(v["MAD"] for v in rejected) / len(rejected) if rejected else 0
 
     lines = [
         f"De las {len(variations)} variaciones generadas, el usuario aprobó "
@@ -210,12 +205,12 @@ def _rule_based_summary(session_json: dict) -> str:
         ids = ", ".join(v["id"] for v in accepted)
         coherente = avg_acc >= 0.6
         lines.append(
-            f"Las variaciones aprobadas ({ids}) registraron un score de autenticidad "
-            f"promedio de {avg_acc:.2f}, "
+            f"Las variaciones aprobadas ({ids}) registraron un MAD promedio "
+            f"de {avg_acc:.2f}, "
             + (
-                "consistente con un criterio alineado al del clasificador forense."
+                "consistente con un criterio alineado al de las métricas visuales."
                 if coherente
-                else "lo cual sugiere un criterio más permisivo que el del clasificador en al menos un caso."
+                else "lo cual sugiere un criterio más permisivo que el de las métricas en al menos un caso."
             )
         )
 
@@ -223,17 +218,17 @@ def _rule_based_summary(session_json: dict) -> str:
         ids = ", ".join(v["id"] for v in rejected)
         coherente = avg_rej < 0.5
         lines.append(
-            f"Las variaciones rechazadas ({ids}) promediaron un score de {avg_rej:.2f}, "
+            f"Las variaciones rechazadas ({ids}) promediaron un MAD de {avg_rej:.2f}, "
             + (
                 "coincidiendo con señales de manipulación detectadas automáticamente."
                 if coherente
-                else "a pesar de un score relativamente alto, lo que indica un criterio más estricto por parte del usuario."
+                else "a pesar de un valor relativamente alto, lo que indica un criterio más estricto por parte del usuario."
             )
         )
 
     lines.append(
-        "Este resumen combina la decisión humana con la señal del modelo generativo "
-        "y se conserva únicamente durante la sesión activa."
+        "Este resumen combina la decisión humana con las métricas visuales calculadas "
+        "(MAD, FID, LPIPS, ArcFace) y se conserva únicamente durante la sesión activa."
     )
     return "\n\n".join(lines)
 
@@ -245,7 +240,9 @@ def generate_summary(session_json: dict, model_folder: Optional[Path] = None) ->
     Intenta primero el AuditAgent real (Gemini, parte 4 del equipo). Si
     no hay GEMINI_API_KEY configurada, o la llamada falla por cualquier
     motivo (sin internet, cuota, formato inesperado), cae al resumen
-    basado en reglas — nunca rompe el reporte.
+    basado en reglas — nunca rompe el reporte. `session_json` ya viene
+    en el formato exacto que exige el agente (con MAD/FID/LPIPS/ArcFace,
+    ver utils/json_manager.py), así que se le pasa tal cual.
     """
     try:
         api_key = audit_agent.get_gemini_api_key()
@@ -256,11 +253,13 @@ def generate_summary(session_json: dict, model_folder: Optional[Path] = None) ->
                 "text": result["report"],
                 "source": "agent",
                 "metrics": result["metrics"],
-                "approved": result["approved"],
+                "approved": result.get("majority_accepted", result.get("approved")),
             }
     except Exception as e:
         print(f"[inference] AuditAgent (Gemini) no disponible, usando resumen local: {e}")
 
+    # el resumen basado en reglas usa nuestras claves internas (MAD ya
+    # viene con ese nombre en session_json -- ver json_manager)
     return {
         "text": _rule_based_summary(session_json),
         "source": "rule_based",

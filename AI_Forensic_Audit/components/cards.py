@@ -35,24 +35,35 @@ def render_cards():
     )
 
     img_uri = _img_data_uri(current["image_path_abs"])
-    dial = svg.dial_svg(current["authenticity_score"], size=40)
+    score_color = svg.score_color(current["authenticity_score"])
 
-    _, mid, _ = st.columns([1, 2, 1])
+    _, mid, _ = st.columns([1, 5, 1])
     with mid:
         st.markdown(
             f"""
-            <div class="dv-stage">
-              <div class="dv-card">
-                <img src="{img_uri}">
-                <div class="tag">{current['id']}</div>
-                <div class="scrim">
-                  <div class="dv-score-row">
-                    {dial}
-                    <div>
-                      <div class="dv-score-label">Authenticity score</div>
-                      <div class="dv-mono" style="font-size:13px;">{current['authenticity_score']:.2f}</div>
-                    </div>
-                  </div>
+            <div class="dv-eval-row">
+              <div class="dv-stage">
+                <div class="dv-card">
+                  <img src="{img_uri}">
+                  <div class="tag">{current['id']}</div>
+                </div>
+              </div>
+              <div class="dv-metrics-panel">
+                <div class="dv-metric">
+                  <span class="m-label">Authenticity score</span>
+                  <span class="m-value" style="color:{score_color};">{current['authenticity_score']:.2f}</span>
+                </div>
+                <div class="dv-metric">
+                  <span class="m-label">FID</span>
+                  <span class="m-value">{current['fid']:.2f}</span>
+                </div>
+                <div class="dv-metric">
+                  <span class="m-label">LPIPS</span>
+                  <span class="m-value">{current['lpips']:.3f}</span>
+                </div>
+                <div class="dv-metric">
+                  <span class="m-label">ArcFace</span>
+                  <span class="m-value">{current['arcface']:.3f}</span>
                 </div>
               </div>
             </div>

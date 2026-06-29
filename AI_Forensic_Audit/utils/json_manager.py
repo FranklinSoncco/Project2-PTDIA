@@ -2,12 +2,18 @@
 utils/json_manager.py
 ----------------------
 Construye y persiste el JSON que consume el agente de resumen (parte 4
-del equipo). Formato confirmado por el equipo de NLP — coincide con la
-salida de /generate (session_id, input_image, reconstruction_b64,
-variations con id/label/description/image_path/image_b64) más
-decision/decision_time_seconds que agrega nuestra interfaz. Se incluye
-además authenticity_score (no lo exige el agente, pero seguimos
-calculándolo localmente y es útil para nuestro propio reporte/export).
+del equipo). Formato confirmado por el notebook de prueba del agente
+(Agente.ipynb): coincide con la salida de /generate (session_id,
+input_image, reconstruction_b64, variations con id/label/description/
+image_path/image_b64) más decision/decision_time_seconds y las 4
+métricas locales (MAD/FID/LPIPS/ArcFace) que agrega nuestra interfaz.
+
+Nota sobre el nombre "MAD": en utils/metrics.py es nuestra heurística
+de autenticidad de siempre — el agente la espera bajo esa clave, no
+bajo "authenticity_score" (su propio prompt instruye al LLM a usar el
+término "MAD"). Internamente seguimos llamándola authenticity_score en
+nuestra UI ("AUTHENTICITY SCORE"); solo se renombra a "MAD" justo aquí,
+al construir el JSON para el agente.
 """
 
 from __future__ import annotations
@@ -35,7 +41,10 @@ def build_session_json(
                 "image_b64": v["image_b64"],
                 "decision": v.get("decision"),
                 "decision_time_seconds": v.get("decision_time_seconds"),
-                "authenticity_score": round(float(v["authenticity_score"]), 4),
+                "MAD": round(float(v["authenticity_score"]), 4),
+                "FID": round(float(v["fid"]), 4),
+                "LPIPS": round(float(v["lpips"]), 4),
+                "ArcFace": round(float(v["arcface"]), 4),
             }
             for v in variations
         ],
@@ -53,9 +62,12 @@ def build_export_json(session_id: str, variations: List[Dict[str, Any]]) -> dict
                 "label": v.get("label") or "Variación",
                 "description": v.get("description") or "",
                 "image_path": v["image_path"],
-                "authenticity_score": round(float(v["authenticity_score"]), 4),
                 "decision": v.get("decision"),
                 "decision_time_seconds": v.get("decision_time_seconds"),
+                "MAD": round(float(v["authenticity_score"]), 4),
+                "FID": round(float(v["fid"]), 4),
+                "LPIPS": round(float(v["lpips"]), 4),
+                "ArcFace": round(float(v["arcface"]), 4),
             }
             for v in variations
         ],
