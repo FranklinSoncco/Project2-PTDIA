@@ -26,7 +26,11 @@ vinieron del backend, de un modelo local o del modo simulado):
                         el más liviano de los tres que ofrece la librería).
   ArcFace rango [-1,1]  mayor = identidad más preservada. Por variación,
                         vía similitud coseno entre embeddings faciales
-                        ArcFace (insightface, buffalo_l).
+                        obtenidos con InceptionResnetV1 (pretrained
+                        'vggface2') + MTCNN de facenet-pytorch. Se
+                        reemplazó insightface/buffalo_l que causaba
+                        errores persistentes de libGL.so.1 / opencv en
+                        Streamlit Community Cloud.
 
 Todas cargan su modelo de forma perezosa la primera vez que se llaman,
 cacheado con st.cache_resource (una sola carga por proceso de servidor,
@@ -47,7 +51,6 @@ backend (que sí tiene GPU) si se vuelve un problema real.
 
 from __future__ import annotations
 import random
-from typing import Optional
 
 import numpy as np
 from PIL import Image
@@ -185,36 +188,57 @@ def compute_fid_session(original: Image.Image, variants: list) -> float:
 
 # --------------------------------------------------------------------------
 # ArcFace — preservación de identidad, por variación
+# Implementado con facenet-pytorch (InceptionResnetV1 + MTCNN):
+#   - puro PyTorch, sin OpenCV ni libGL → funciona en Streamlit Cloud
+#   - misma semántica: similitud coseno de embeddings faciales 512-d
+#   - pretrained='vggface2' (~100 MB, se descarga automáticamente 1.ª vez)
+#   - si MTCNN no detecta cara (imagen muy generada / ángulo extremo),
+#     usa crop central 75% para no devolver siempre el fallback 0.0
 # --------------------------------------------------------------------------
 
 @st.cache_resource(show_spinner=False)
-def _load_arcface_model():
-    from insightface.app import FaceAnalysis
-    app = FaceAnalysis(name="buffalo_l")
-    app.prepare(ctx_id=-1, det_size=(320, 320))  # ctx_id=-1 -> CPU
-    return app
+def _load_facenet_models():
+    from facenet_pytorch import MTCNN, InceptionResnetV1
+    mtcnn = MTCNN(
+        image_size=160, margin=20, keep_all=False,
+        thresholds=[0.6, 0.7, 0.7],
+    )
+    resnet = InceptionResnetV1(pretrained="vggface2").eval()
+    return mtcnn, resnet
 
 
-def _face_embedding(app, image: Image.Image) -> Optional[np.ndarray]:
-    arr = np.array(image.convert("RGB"))[:, :, ::-1]  # RGB -> BGR (lo que espera insightface)
-    faces = app.get(arr)
-    if not faces:
-        return None
-    return faces[0].normed_embedding
+def _face_embedding(mtcnn, resnet, image: Image.Image):
+    import torch
+    import torchvision.transforms as T
+
+    img_rgb = image.convert("RGB")
+    face_tensor = mtcnn(img_rgb)  # None si no detectó cara
+
+    if face_tensor is None:
+        # Fallback: crop central que captura la región de rostro típica
+        w, h = img_rgb.size
+        margin = int(min(w, h) * 0.12)
+        cropped = img_rgb.crop((margin, margin, w - margin, h - margin))
+        face_tensor = T.Compose([
+            T.Resize(160),
+            T.ToTensor(),
+        ])(cropped) * 2 - 1  # normalizar a [-1, 1] igual que MTCNN
+
+    with torch.no_grad():
+        emb = resnet(face_tensor.unsqueeze(0))
+    return emb
 
 
 def compute_arcface_similarity(original: Image.Image, variant: Image.Image) -> float:
     try:
-        app = _load_arcface_model()
-        emb_real = _face_embedding(app, original)
-        emb_var = _face_embedding(app, variant)
-        if emb_real is None or emb_var is None:
-            print("[metrics] ArcFace: no se detectó rostro en alguna imagen, usando respaldo")
-            return FALLBACK_ARCFACE
-        sim = float(np.dot(emb_real, emb_var))
+        import torch
+        mtcnn, resnet = _load_facenet_models()
+        emb_real = _face_embedding(mtcnn, resnet, original)
+        emb_var = _face_embedding(mtcnn, resnet, variant)
+        sim = torch.nn.functional.cosine_similarity(emb_real, emb_var).item()
         return round(_clip(sim, *ARCFACE_RANGE), 4)
     except Exception as e:
-        print(f"[metrics] ArcFace no disponible, usando valor de respaldo: {e}")
+        print(f"[metrics] ArcFace (facenet-pytorch) no disponible, usando valor de respaldo: {e}")
         return FALLBACK_ARCFACE
 
 

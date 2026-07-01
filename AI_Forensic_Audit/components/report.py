@@ -131,6 +131,9 @@ def render_report():
                     f'<div class="dv-explain">{summary_result["text"]}</div>',
                     unsafe_allow_html=True,
                 )
+                if summary_result.get("error_detail"):
+                    with st.expander("¿Por qué no se usó el agente (Gemini)?"):
+                        st.code(summary_result["error_detail"], language=None)
 
         st.write("")
         b1, b2, b3 = st.columns(3)
